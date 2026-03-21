@@ -1,0 +1,11 @@
+torch
+torchaudio
+torchvision
+Pillow
+trimesh
+meshio
+matplotlib
+numpy
+scipy
+polyscope
+sounddevice
