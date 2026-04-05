@@ -8,7 +8,6 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import global_max_pool
 
 # 确保项目根目录在 sys.path 中
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,91 +18,34 @@ from config.config import cfg
 import src.models.ocnn_model_ref.my_ocnn as ocnn_unet
 
 
-class FiLMResidualBlock(nn.Module):
-    """
-    FiLM 残差块：利用局部激振特征，有选择性地调制全局共振基底。
-    遵循 L2G-FiLM-Net 阶段 B 的设计。
-    """
-    def __init__(self, hidden_dim, condition_dim):
+class AcousticFieldHead(nn.Module):
+    def __init__(self, hidden_dim, output_dim):
         super().__init__()
-        # 1. 参数投影层：预测缩放系数 (gamma) 和平移系数 (beta)
-        self.gamma_layer = nn.Linear(condition_dim, hidden_dim)
-        self.beta_layer = nn.Linear(condition_dim, hidden_dim)
-        
-        # 特征映射层
-        self.res_layer = nn.Linear(hidden_dim, hidden_dim)
-        self.activation = nn.ReLU()
-
-    def forward(self, main_feature, condition_feature):
-        """
-        main_feature: 主干特征 (最初为全局特征 E_global)
-        condition_feature: 条件特征 (局部激振特征 E_hit)
-        """
-        # 计算缩放系数和平移系数
-        gamma = self.gamma_layer(condition_feature)
-        beta = self.beta_layer(condition_feature)
-        
-        # 2. 特征调制 (Feature-wise Modulation)
-        # 用生成的系数对主干特征进行逐元素仿射变换
-        modulated = gamma * main_feature + beta
-        
-        # 3. 非线性激活与残差连接
-        output = self.activation(self.res_layer(modulated)) + main_feature
-        return output
-
-
-class L2G_FiLM_Decoder(nn.Module):
-    """
-    级联特征调制解码器 (Cascaded FiLM Decoder)
-    包含 K 个 FiLM-ResBlocks 和最终的降维输出多层感知机。
-    """
-    def __init__(self, hidden_dim, output_dim, num_blocks=4):
-        super().__init__()
-        # 串联的 K 个 FiLM 残差块
-        self.blocks = nn.ModuleList([
-            FiLMResidualBlock(hidden_dim, hidden_dim) for _ in range(num_blocks)
-        ])
-        
-        # 阶段 C: 降维与声学输出 (Acoustic Readout)
-        # 两层 MLP，将隐藏层维度压降至目标声音特征维度 (如 64 维)
-        self.readout = nn.Sequential(
+        self.layers = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, output_dim)
         )
 
-    def forward(self, global_feature, hit_feature):
-        # 初始化解码器的主干输入为全局特征
-        hidden = global_feature
-        
-        # 逐层进行特征调制
-        for block in self.blocks:
-            hidden = block(hidden, hit_feature)
-            
-        # 最终输出目标声音特征
-        output = self.readout(hidden)
-        return output
+    def forward(self, vertex_features):
+        return self.layers(vertex_features)
 
 
 class MyPipeline(pl.LightningModule):
-    """
-    L2G-FiLM-Net 核心管道类。
-    实现“局部特征调制全局特征”且“纯离散顶点、无插值、纯前向推理”的核心共识。
-    """
     def __init__(self, learning_rate=None):
         super().__init__()
         self.learning_rate = learning_rate if learning_rate is not None else getattr(cfg, "LEARNING_RATE", 1e-3)
         self.hidden_dim = getattr(cfg, "HIDDEN_DIM", 256)
-        self.output_dim = getattr(cfg, "OUTPUT_DIM", 64)
-        self.input_feature = ocnn.modules.InputFeature("ND", nempty=cfg.OCTREE_NEMPTY)
-        self.backbone_network = ocnn_unet.UNet(in_channels=4, out_channels=self.hidden_dim, nempty=cfg.OCTREE_NEMPTY)
-        self.decoder = L2G_FiLM_Decoder(
-            hidden_dim=self.hidden_dim,
-            output_dim=self.output_dim,
-            num_blocks=4
-        )
+        self.output_dim = getattr(cfg, "OUTPUT_DIM", 256)
+        self.input_feature = ocnn.modules.InputFeature("NPD", nempty=cfg.OCTREE_NEMPTY)
+        self.backbone_network = ocnn_unet.UNet(in_channels=7, out_channels=self.hidden_dim, nempty=cfg.OCTREE_NEMPTY)
+        self.acoustic_head = AcousticFieldHead(self.hidden_dim, self.output_dim)
 
-    def build_validation_report(self, targets, output, loss):
+    def build_targets(self, batch_data):
+        targets = torch.cat([mel.float().to(self.device).max(dim=-1).values for mel in batch_data["mel_spectrogram"]], dim=0)
+        return F.adaptive_avg_pool1d(targets.unsqueeze(1), self.output_dim).squeeze(1)
+
+    def build_prediction_report(self, targets, output, loss, stage):
         gt = targets.detach().cpu()
         pred = output.detach().cpu()
         diff = (pred - gt).abs()
@@ -125,7 +67,7 @@ class MyPipeline(pl.LightningModule):
         ax_text = fig.add_subplot(gs[0, :])
         ax_text.axis("off")
         text = "\n".join([
-            f"epoch={self.current_epoch}  val_loss={float(loss.item()):.6f}  samples={gt.size(0)}  dims={gt.size(1)}",
+            f"epoch={self.current_epoch}  {stage}_loss={float(loss.item()):.6f}  samples={gt.size(0)}  dims={gt.size(1)}",
             f"global_mae={mae:.6f}  global_rmse={rmse:.6f}  sample_idx={sample_idx}  sample_corr={corr:.6f}",
             f"gt(mean/std/min/max)=({gt_sample.mean():.4f}, {gt_sample.std():.4f}, {gt_sample.min():.4f}, {gt_sample.max():.4f})",
             f"pred(mean/std/min/max)=({pred_sample.mean():.4f}, {pred_sample.std():.4f}, {pred_sample.min():.4f}, {pred_sample.max():.4f})",
@@ -178,14 +120,12 @@ class MyPipeline(pl.LightningModule):
         octree = batch_data["octree"].to(self.device)
         data = self.input_feature(octree)
         offsets = torch.tensor([0] + [pos.size(0) for pos in positions[:-1]], dtype=torch.long, device=self.device).cumsum(0)
-        num_impacts = batch_data["num_impacts"].to(self.device)
         hit_face_indices = torch.cat([
             gnn_face_index.to(self.device).long() + offset
             for gnn_face_index, offset in zip(batch_data["gnn_face_index"], offsets)
         ], dim=0)
         hit_barycentric = torch.cat([weights.to(self.device) for weights in batch_data["gnn_barycentric"]], dim=0)
-        targets = torch.cat([mel.float().to(self.device).max(dim=-1).values for mel in batch_data["mel_spectrogram"]], dim=0)
-        targets = F.adaptive_avg_pool1d(targets.unsqueeze(1), self.output_dim).squeeze(1)
+        targets = self.build_targets(batch_data)
         query_batch_index = torch.cat(
             [torch.full((pos.size(0),), idx, dtype=torch.long, device=self.device) for idx, pos in enumerate(positions)],
             dim=0,
@@ -195,25 +135,26 @@ class MyPipeline(pl.LightningModule):
             dim=0,
         )
         vertex_features = self.backbone_network(data=data, octree=octree, depth=octree.depth, query_pts=query_pts)
-        global_features = global_max_pool(vertex_features, query_batch_index)
-        global_features = torch.repeat_interleave(global_features, num_impacts, dim=0)
-        hit_features = (vertex_features[hit_face_indices] * hit_barycentric.unsqueeze(-1)).sum(dim=1)
-        output = self.decoder(global_features, hit_features)
+        vertex_embeddings = self.acoustic_head(vertex_features)
+        output = (vertex_embeddings[hit_face_indices] * hit_barycentric.unsqueeze(-1)).sum(dim=1)
         loss = F.smooth_l1_loss(output, targets)
         return loss, output
 
     def training_step(self, batch, batch_idx):
-        loss, _ = self(batch)
+        loss, output = self(batch)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch["num_impacts"].sum().item())
+        if batch_idx == 0 and getattr(self.logger, "experiment", None) is not None:
+            targets = self.build_targets(batch)
+            report = self.build_prediction_report(targets, output, loss, stage="train")
+            self.logger.experiment.add_image("train/gt_pred_absdiff", report, self.current_epoch)
         return loss
 
     def validation_step(self, batch, batch_idx):
         loss, output = self(batch)
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch["num_impacts"].sum().item())
         if batch_idx == 0 and getattr(self.logger, "experiment", None) is not None:
-            targets = torch.cat([mel.float().to(self.device).max(dim=-1).values for mel in batch["mel_spectrogram"]], dim=0)
-            targets = F.adaptive_avg_pool1d(targets.unsqueeze(1), self.output_dim).squeeze(1)
-            report = self.build_validation_report(targets, output, loss)
+            targets = self.build_targets(batch)
+            report = self.build_prediction_report(targets, output, loss, stage="val")
             self.logger.experiment.add_image("val/gt_pred_absdiff", report, self.current_epoch)
         return loss
 

@@ -104,10 +104,10 @@ def main():
         callbacks=[checkpoint_callback, early_stop_callback],
         accelerator=accelerator,
         devices=devices,
-        log_every_n_steps=1,
+        log_every_n_steps=5,
         logger=tensorboard_logger,
         enable_progress_bar=True,
-        enable_model_summary=False,
+        enable_model_summary=True,
         num_sanity_val_steps=0,
         default_root_dir=os.path.join(project_root, "logs")
     )

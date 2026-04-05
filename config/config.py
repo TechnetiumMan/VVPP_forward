@@ -5,7 +5,7 @@ class Config:
     # 优化器学习率
     LEARNING_RATE = 1e-3
     # 每个 batch 中包含的 mesh 数量
-    BATCH_SIZE = 2
+    BATCH_SIZE = 1
     # 最大训练轮数
     MAX_EPOCHS = 100
     # 权重衰减系数
