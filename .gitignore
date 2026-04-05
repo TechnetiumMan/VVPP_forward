@@ -5,7 +5,7 @@ __pycache__/
 *.pyd
 
 *.ckpt
-log/*
+logs/*
 
 # Environments
 .env
