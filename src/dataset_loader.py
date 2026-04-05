@@ -200,6 +200,9 @@ class VVImpactDataset(Dataset):
         self.interp_cache = {}
         self.octree_cache = {}
         self.resampler_cache = {}
+        self.spec_tensor_cache = {}
+        self.spec_cache_dir = os.path.join(self.data_dir, ".cache", "impact_specs")
+        os.makedirs(self.spec_cache_dir, exist_ok=True)
 
         specs_dir = os.path.join(self.data_dir, "impact_specs")
         audio_dir = os.path.join(self.data_dir, "impact_audio")
@@ -250,6 +253,41 @@ class VVImpactDataset(Dataset):
             if candidate and os.path.isdir(os.path.join(candidate, "impact_specs")) and os.path.isdir(os.path.join(candidate, "msh")):
                 return candidate
         return data_dir
+
+    def get_spec_cache_path(self, spec_path):
+        spec_root = os.path.join(self.data_dir, "impact_specs")
+        rel_path = os.path.relpath(spec_path, spec_root)
+        return os.path.join(self.spec_cache_dir, os.path.splitext(rel_path)[0] + ".pt")
+
+    def save_spec_tensor_cache(self, cache_path, spec_tensor):
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        temp_path = f"{cache_path}.{os.getpid()}.tmp"
+        try:
+            torch.save(spec_tensor, temp_path)
+            os.replace(temp_path, cache_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def load_spec_tensor(self, spec_path):
+        spec_mtime = os.path.getmtime(spec_path)
+        cached = self.spec_tensor_cache.get(spec_path)
+        if cached is not None and cached["mtime"] >= spec_mtime:
+            return cached["tensor"]
+
+        cache_path = self.get_spec_cache_path(spec_path)
+        if os.path.exists(cache_path) and os.path.getmtime(cache_path) >= spec_mtime:
+            spec_tensor = torch.load(cache_path, map_location="cpu")
+        else:
+            with Image.open(spec_path) as spec_image:
+                spec_tensor = self.spec_transform(spec_image.convert("L")).squeeze(0)
+            self.save_spec_tensor_cache(cache_path, spec_tensor)
+
+        self.spec_tensor_cache[spec_path] = {
+            "mtime": spec_mtime,
+            "tensor": spec_tensor,
+        }
+        return spec_tensor
 
     def __len__(self):
         return len(self.samples)
@@ -313,9 +351,11 @@ class VVImpactDataset(Dataset):
         return cached
 
     def load_spec(self, spec_path):
-        spec_image = Image.open(spec_path).convert("L")
-        spec_tensor = self.spec_transform(spec_image).squeeze(0)
-        preview_tensor = self.preview_transform(spec_image.convert("RGB"))
+        spec_tensor = self.load_spec_tensor(spec_path)
+        if self.train_only:
+            return spec_tensor, None
+        with Image.open(spec_path) as spec_image:
+            preview_tensor = self.preview_transform(spec_image.convert("RGB"))
         return spec_tensor, preview_tensor
 
     def load_waveform(self, wav_path):

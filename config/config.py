@@ -18,7 +18,7 @@ class Config:
     # 数据根目录
     DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "vv++test")
     # DataLoader worker 数量
-    NUM_WORKERS = 4
+    NUM_WORKERS = 8
 
     # 隐藏层特征维度
     HIDDEN_DIM = 256

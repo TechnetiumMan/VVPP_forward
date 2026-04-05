@@ -45,21 +45,33 @@ class MyPipeline(pl.LightningModule):
         targets = torch.cat([mel.float().to(self.device).max(dim=-1).values for mel in batch_data["mel_spectrogram"]], dim=0)
         return F.adaptive_avg_pool1d(targets.unsqueeze(1), self.output_dim).squeeze(1)
 
-    def build_prediction_report(self, targets, output, loss, stage):
+    def build_prediction_report(self, batch_data, targets, output, loss, stage):
         gt = targets.detach().cpu()
         pred = output.detach().cpu()
         diff = (pred - gt).abs()
-        sample_idx = int(diff.mean(dim=1).argmax().item())
-        gt_sample = gt[sample_idx]
-        pred_sample = pred[sample_idx]
-        diff_sample = diff[sample_idx]
-        sample_count = min(8, gt.size(0))
-        gt_panel = gt[:sample_count]
-        pred_panel = pred[:sample_count]
-        mae = diff.mean().item()
-        rmse = torch.sqrt(((pred - gt) ** 2).mean()).item()
+        object_impact_count = int(batch_data["num_impacts"][0].item())
+        gt_object = gt[:object_impact_count]
+        pred_object = pred[:object_impact_count]
+        diff_object = diff[:object_impact_count]
+        sample_idx = 0
+        gt_sample = gt_object[sample_idx]
+        pred_sample = pred_object[sample_idx]
+        diff_sample = diff_object[sample_idx]
+        sample_count = min(8, gt_object.size(0))
+        gt_panel = gt_object[:sample_count]
+        pred_panel = pred_object[:sample_count]
+        mae = diff_object.mean().item()
+        rmse = torch.sqrt(((pred_object - gt_object) ** 2).mean()).item()
         corr = torch.corrcoef(torch.stack([gt_sample, pred_sample]))[0, 1].item() if gt_sample.numel() > 1 else 0.0
         worst_dims = torch.topk(diff_sample, k=min(8, diff_sample.numel())).indices.tolist()
+        impact_points = batch_data["impact_point"][0].detach().cpu()
+        highlighted_point = impact_points[sample_idx]
+        axis_variance = impact_points.var(dim=0)
+        axis_order = torch.argsort(axis_variance, descending=True).tolist()
+        axis_x = axis_order[0]
+        axis_y = axis_order[1]
+        axis_names = ["x", "y", "z"]
+        obj_id = batch_data["obj_id"][0]
 
         fig = plt.figure(figsize=(16, 10), dpi=160)
         gs = fig.add_gridspec(3, 3, height_ratios=[1.1, 1.6, 1.6])
@@ -67,10 +79,11 @@ class MyPipeline(pl.LightningModule):
         ax_text = fig.add_subplot(gs[0, :])
         ax_text.axis("off")
         text = "\n".join([
-            f"epoch={self.current_epoch}  {stage}_loss={float(loss.item()):.6f}  samples={gt.size(0)}  dims={gt.size(1)}",
-            f"global_mae={mae:.6f}  global_rmse={rmse:.6f}  sample_idx={sample_idx}  sample_corr={corr:.6f}",
+            f"epoch={self.current_epoch}  {stage}_loss={float(loss.item()):.6f}  obj_id={obj_id}  obj_impacts={object_impact_count}  dims={gt_object.size(1)}",
+            f"object_mae={mae:.6f}  object_rmse={rmse:.6f}  impact_idx={sample_idx}  sample_corr={corr:.6f}",
             f"gt(mean/std/min/max)=({gt_sample.mean():.4f}, {gt_sample.std():.4f}, {gt_sample.min():.4f}, {gt_sample.max():.4f})",
             f"pred(mean/std/min/max)=({pred_sample.mean():.4f}, {pred_sample.std():.4f}, {pred_sample.min():.4f}, {pred_sample.max():.4f})",
+            f"impact_xyz=({highlighted_point[0]:.4f}, {highlighted_point[1]:.4f}, {highlighted_point[2]:.4f})",
             f"worst_dims={worst_dims}",
         ])
         ax_text.text(0.01, 0.98, text, va="top", ha="left", family="monospace", fontsize=11)
@@ -86,13 +99,24 @@ class MyPipeline(pl.LightningModule):
         ax_diff.set_title("Absolute Error")
 
         ax_scatter = fig.add_subplot(gs[1, 2])
-        ax_scatter.scatter(gt_sample.numpy(), pred_sample.numpy(), s=18, alpha=0.8)
-        lo = min(gt_sample.min().item(), pred_sample.min().item())
-        hi = max(gt_sample.max().item(), pred_sample.max().item())
-        ax_scatter.plot([lo, hi], [lo, hi], color="black", linewidth=1)
-        ax_scatter.set_title("GT-Pred Scatter")
-        ax_scatter.set_xlabel("GT")
-        ax_scatter.set_ylabel("Pred")
+        ax_scatter.scatter(
+            impact_points[:, axis_x].numpy(),
+            impact_points[:, axis_y].numpy(),
+            s=24,
+            alpha=0.7,
+            label="Impacts",
+        )
+        ax_scatter.scatter(
+            highlighted_point[axis_x].item(),
+            highlighted_point[axis_y].item(),
+            s=70,
+            color="tab:red",
+            label="Selected",
+        )
+        ax_scatter.set_title("Impact Positions")
+        ax_scatter.set_xlabel(axis_names[axis_x])
+        ax_scatter.set_ylabel(axis_names[axis_y])
+        ax_scatter.legend()
 
         ax_gt = fig.add_subplot(gs[2, 0])
         im_gt = ax_gt.imshow(gt_panel.numpy(), aspect="auto", cmap="viridis")
@@ -145,7 +169,7 @@ class MyPipeline(pl.LightningModule):
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch["num_impacts"].sum().item())
         if batch_idx == 0 and getattr(self.logger, "experiment", None) is not None:
             targets = self.build_targets(batch)
-            report = self.build_prediction_report(targets, output, loss, stage="train")
+            report = self.build_prediction_report(batch, targets, output, loss, stage="train")
             self.logger.experiment.add_image("train/gt_pred_absdiff", report, self.current_epoch)
         return loss
 
@@ -154,7 +178,7 @@ class MyPipeline(pl.LightningModule):
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch["num_impacts"].sum().item())
         if batch_idx == 0 and getattr(self.logger, "experiment", None) is not None:
             targets = self.build_targets(batch)
-            report = self.build_prediction_report(targets, output, loss, stage="val")
+            report = self.build_prediction_report(batch, targets, output, loss, stage="val")
             self.logger.experiment.add_image("val/gt_pred_absdiff", report, self.current_epoch)
         return loss
 
