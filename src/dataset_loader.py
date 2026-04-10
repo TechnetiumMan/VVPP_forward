@@ -360,6 +360,7 @@ class VVImpactDataset(Dataset):
         return cached
 
     def load_spec(self, spec_path):
+        # TODO: 后续改成从音频现算频谱，而不是从图片加载。从图片加载可能不准确，但是可以作为测试模型的可训练性与可视化用
         spec_tensor = self.load_spec_tensor(spec_path)
         if self.train_only:
             return spec_tensor, None

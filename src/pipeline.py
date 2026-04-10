@@ -175,8 +175,8 @@ class AcousticFieldHead(nn.Module):
         
         # prob: 存在概率，限制在 [0, 1]
         prob = torch.sigmoid(out[..., 0])
-        # amp: 振幅，加上初始偏置确保为正
-        amps = F.softplus(out[..., 2] + 1.0)
+        # amp: 振幅
+        amps = F.softplus(out[..., 2])
         
         if self.use_modal_bins:
             # 方案一：强行划分区间 (Fixed Bins)
@@ -273,7 +273,7 @@ class MyPipeline(pl.LightningModule):
         target_energy = targets.sum(dim=-1)
         energy_loss = F.l1_loss(pred_energy, target_energy)
         
-        total_loss = smooth_l1_loss * 10.0 + emd_loss * 1.0 + energy_loss * 1.0
+        total_loss = smooth_l1_loss * 10.0 + emd_loss * 1.0 + energy_loss * 0.1
         mode_loss = torch.tensor(0.0, device=self.device)
         
         # 4. 模态稀疏惩罚 (针对 modal_anchor 方案及无匹配集合预测方案)
@@ -284,7 +284,7 @@ class MyPipeline(pl.LightningModule):
             mode_loss = prob.mean()
             total_loss = total_loss + mode_loss * self.sparse_penalty_weight
                 
-        return total_loss, smooth_l1_loss, emd_loss, mode_loss
+        return total_loss, smooth_l1_loss, emd_loss, mode_loss, energy_loss
 
     def select_global_context_points(self, vertices):
         if vertices.size(0) <= self.global_context_points:
@@ -379,17 +379,17 @@ class MyPipeline(pl.LightningModule):
         vmax = max(gt_panel.max().item(), pred_panel.max().item())
 
         ax_gt = fig.add_subplot(gs[2, 0])
-        im_gt = ax_gt.imshow(gt_panel.numpy(), aspect="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+        im_gt = ax_gt.imshow(gt_panel.numpy().T, aspect="auto", cmap="viridis", vmin=vmin, vmax=vmax)
         ax_gt.set_title("GT Heatmap")
         fig.colorbar(im_gt, ax=ax_gt, fraction=0.046, pad=0.04)
 
         ax_pred = fig.add_subplot(gs[2, 1])
-        im_pred = ax_pred.imshow(pred_panel.numpy(), aspect="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+        im_pred = ax_pred.imshow(pred_panel.numpy().T, aspect="auto", cmap="viridis", vmin=vmin, vmax=vmax)
         ax_pred.set_title("Pred Heatmap")
         fig.colorbar(im_pred, ax=ax_pred, fraction=0.046, pad=0.04)
 
         ax_err = fig.add_subplot(gs[2, 2])
-        im_err = ax_err.imshow((pred_panel - gt_panel).abs().numpy(), aspect="auto", cmap="magma")
+        im_err = ax_err.imshow((pred_panel - gt_panel).abs().numpy().T, aspect="auto", cmap="magma")
         ax_err.set_title("AbsDiff Heatmap")
         fig.colorbar(im_err, ax=ax_err, fraction=0.046, pad=0.04)
 
@@ -437,14 +437,15 @@ class MyPipeline(pl.LightningModule):
         global_features = torch.cat(global_feature_groups, dim=0)
         
         output, aux_data = self.acoustic_head(local_features, global_features, point_xyz, mode=self.prediction_mode)
-        loss, smooth_l1_loss, emd_loss, mode_loss = self.compute_loss_terms(output, targets, aux_data)
-        return loss, output, smooth_l1_loss, emd_loss, mode_loss
+        loss, smooth_l1_loss, emd_loss, mode_loss, energy_loss = self.compute_loss_terms(output, targets, aux_data)
+        return loss, output, smooth_l1_loss, emd_loss, mode_loss, energy_loss
 
     def training_step(self, batch, batch_idx):
-        loss, output, smooth_l1_loss, emd_loss, mode_loss = self(batch)
+        loss, output, smooth_l1_loss, emd_loss, mode_loss, energy_loss = self(batch)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch["num_impacts"].sum().item())
         self.log("train_smooth_l1_loss", smooth_l1_loss, on_step=True, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
         self.log("train_emd_loss", emd_loss, on_step=True, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
+        self.log("train_energy_loss", energy_loss, on_step=True, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
         if self.prediction_mode in ["bipartite", "anchor", "modal_anchor"]:
             self.log("train_mode_loss", mode_loss, on_step=True, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
         
@@ -453,7 +454,7 @@ class MyPipeline(pl.LightningModule):
             lr = opt.param_groups[0]["lr"]
             self.log("lr", lr, on_step=False, on_epoch=True, prog_bar=True)
             
-        should_log_train_visualization = (self.current_epoch + 1) % self.train_vis_every_n_epochs == 0
+        should_log_train_visualization = (self.current_epoch) % self.train_vis_every_n_epochs == 0
         if batch_idx == 0 and should_log_train_visualization and getattr(self.logger, "experiment", None) is not None:
             targets = self.build_targets(batch)
             report = self.build_prediction_report(batch, targets, output, loss, stage="train")
@@ -465,6 +466,7 @@ class MyPipeline(pl.LightningModule):
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch["num_impacts"].sum().item())
         self.log("val_smooth_l1_loss", smooth_l1_loss, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
         self.log("val_emd_loss", emd_loss, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
+        self.log("val_energy_loss", energy_loss, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
         if self.prediction_mode in ["bipartite", "anchor", "modal_anchor"]:
             self.log("val_mode_loss", mode_loss, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
             
@@ -479,6 +481,7 @@ class MyPipeline(pl.LightningModule):
         self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch["num_impacts"].sum().item())
         self.log("test_smooth_l1_loss", smooth_l1_loss, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
         self.log("test_emd_loss", emd_loss, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
+        self.log("test_energy_loss", energy_loss, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
         if self.prediction_mode in ["bipartite", "anchor", "modal_anchor"]:
             self.log("test_mode_loss", mode_loss, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch["num_impacts"].sum().item())
         return loss
