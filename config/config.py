@@ -8,8 +8,10 @@ class Config:
     # 每个 batch 中包含的 mesh 数量
     BATCH_SIZE = 1
     # 最大训练轮数
-    MAX_EPOCHS = 500
-    DATASET_PERCENT = 3.0
+    MAX_EPOCHS = 5000
+    # 最大样本数量
+    OBJ_LIMIT = 2
+    DATASET_PERCENT = 100
     VAL_EVERY_N_EPOCHS = 10
     TRAIN_VIS_EVERY_N_EPOCHS = 10
     # 早停耐心值：如果验证集 loss 在多少个 epoch 内没有下降，就提前停止。如果设为足够大（如 500），等同于关闭早停
@@ -28,14 +30,15 @@ class Config:
     
     # --- GPU 配置 ---
     # 模式1：手动指定 GPU (例如 [0, 1])。如果不为空，则直接使用指定的 GPU
-    GPU_IDS = [4]
+    GPU_IDS = [3]
     # 模式2：自动寻找空闲 GPU。如果 AUTO_FIND_GPUS 为 True，则忽略 GPU_IDS，自动寻找 DEVICES 个空闲 GPU
     AUTO_FIND_GPUS = False
     # 使用的设备数量（手动指定时会被自动同步，自动寻找时用于指定寻找的数量）
     DEVICES = 1
 
     # 数据根目录
-    DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "vv++test")
+    DATA_DIR = "/mnt/GIL-NFS/xuchenxi/vv++/objaverse-gen"
+    
     # DataLoader worker 数量
     NUM_WORKERS = 8
 

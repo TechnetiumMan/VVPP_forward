@@ -185,7 +185,7 @@ from config.config import cfg
 
 
 class VVImpactDataset(Dataset):
-    def __init__(self, data_dir=None, sample_rate=16000, transform_image=None, train_only=False):
+    def __init__(self, data_dir=None, sample_rate=16000, transform_image=None, train_only=False, obj_limit=None):
         self.data_dir = self.resolve_data_dir(data_dir or cfg.DATA_DIR)
         self.sample_rate = sample_rate
         self.train_only = train_only
@@ -195,6 +195,8 @@ class VVImpactDataset(Dataset):
         ])
         self.spec_transform = T.ToTensor()
         self.samples = []
+        self.sampled_num = 0
+        self.obj_limit = obj_limit
         self.mesh_cache = {}
         self.remesh_cache = {}
         self.interp_cache = {}
@@ -206,7 +208,7 @@ class VVImpactDataset(Dataset):
 
         specs_dir = os.path.join(self.data_dir, "impact_specs")
         audio_dir = os.path.join(self.data_dir, "impact_audio")
-        msh_dir = os.path.join(self.data_dir, "msh")
+        msh_dir = os.path.join(self.data_dir, "remesh")
         remesh_dir = os.path.join(self.data_dir, "remesh")
         if not os.path.isdir(specs_dir) or not os.path.isdir(audio_dir) or not os.path.isdir(msh_dir) or not os.path.isdir(remesh_dir):
             return
@@ -219,6 +221,9 @@ class VVImpactDataset(Dataset):
             if not os.path.isdir(group_specs_dir) or not os.path.isdir(group_audio_dir) or not os.path.isdir(group_msh_dir) or not os.path.isdir(group_remesh_dir):
                 continue
             for obj_id in sorted(os.listdir(group_specs_dir)):
+                if self.sampled_num >= self.obj_limit:
+                    break
+                self.sampled_num += 1
                 obj_specs_dir = os.path.join(group_specs_dir, obj_id)
                 obj_audio_dir = os.path.join(group_audio_dir, obj_id)
                 msh_path = os.path.join(group_msh_dir, f"{obj_id}.obj_.msh")
